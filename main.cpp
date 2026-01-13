@@ -10,6 +10,7 @@ const int W_WIDTH = 800;
 const int W_HEIGHT = 600;
 
 enum class GameState { Menu, Playing, Shop, GameOver };
+enum class EnemyType { Normal, Tank, Fast };
 
 struct Particle {
     sf::RectangleShape shape;
@@ -23,9 +24,16 @@ struct Bullet {
     float damage;
 };
 
+struct MedKit {
+    sf::CircleShape shape;
+    int healAmount = 20;
+};
+
 struct Enemy {
     sf::RectangleShape shape;
+    EnemyType type;
     float hp;
+    float maxHp;
     float speed;
 };
 
@@ -41,8 +49,7 @@ int main() {
     window.setFramerateLimit(60);
 
     sf::Font font;
-    bool fontLoaded = font.openFromFile("arial.ttf") ||
-                      font.openFromFile("/System/Library/Fonts/Supplemental/Arial.ttf");
+    bool fontLoaded = font.openFromFile("arial.ttf") || font.openFromFile("/System/Library/Fonts/Supplemental/Arial.ttf");
 
     sf::RectangleShape player({30, 30});
     player.setFillColor(sf::Color::Cyan);
@@ -57,12 +64,18 @@ int main() {
     int nextFloorScore = 100;
     float difficulty = 1.0f;
 
+    float dashTimer = 0.f;
+    float dashCooldown = 1.0f;
+    bool isDashing = false;
+    sf::Vector2f dashDir;
+
     std::vector<Bullet> bullets;
     std::vector<Enemy> enemies;
     std::vector<Particle> particles;
+    std::vector<MedKit> medkits;
 
     sf::Text uiText(font, "");
-    uiText.setCharacterSize(20);
+    uiText.setCharacterSize(18);
     uiText.setFillColor(sf::Color::White);
 
     sf::Clock spawnClock, shootClock, gameClock;
@@ -75,161 +88,148 @@ int main() {
             if (event->is<sf::Event::Closed>()) window.close();
 
             if (const auto* k = event->getIf<sf::Event::KeyPressed>()) {
-                if (state == GameState::Menu) {
-                    if (k->code == sf::Keyboard::Key::Enter) state = GameState::Playing;
-                    if (k->code == sf::Keyboard::Key::Up) difficulty += 0.2f;
-                    if (k->code == sf::Keyboard::Key::Down) difficulty = std::max(0.5f, difficulty - 0.2f);
-                }
-                else if (state == GameState::Playing) {
-                    if (k->code == sf::Keyboard::Key::Escape) state = GameState::Menu;
-                }
-                else if (state == GameState::Shop) {
+                if (state == GameState::Menu && k->code == sf::Keyboard::Key::Enter) state = GameState::Playing;
+                if (state == GameState::Shop) {
                     bool picked = false;
-                    if (k->code == sf::Keyboard::Key::Num1) { pDmg += 10; picked = true; }
-                    if (k->code == sf::Keyboard::Key::Num2) { pSpeed += 30; picked = true; }
+                    if (k->code == sf::Keyboard::Key::Num1) { pDmg += 15; picked = true; }
+                    if (k->code == sf::Keyboard::Key::Num2) { pSpeed += 40; picked = true; }
                     if (k->code == sf::Keyboard::Key::Num3) { pHp = 100; picked = true; }
-
-                    if (picked) {
-                        state = GameState::Playing;
-                        floor++;
-                        nextFloorScore += 100 * floor;
-                        enemies.clear();
-                    }
+                    if (picked) { state = GameState::Playing; floor++; nextFloorScore += 150; enemies.clear(); }
                 }
-                else if (state == GameState::GameOver) {
-                    if (k->code == sf::Keyboard::Key::Enter) {
-
-                        pHp = 100; score = 0; floor = 1; nextFloorScore = 100;
-                        enemies.clear(); bullets.clear();
-                        player.setPosition({W_WIDTH / 2, W_HEIGHT / 2});
-                        state = GameState::Playing;
-                    }
+                if (state == GameState::GameOver && k->code == sf::Keyboard::Key::Enter) {
+                    pHp = 100; score = 0; floor = 1; nextFloorScore = 100; difficulty = 1.0f;
+                    enemies.clear(); bullets.clear(); medkits.clear();
+                    player.setPosition({W_WIDTH / 2, W_HEIGHT / 2});
+                    state = GameState::Playing;
                 }
             }
         }
 
         if (state == GameState::Playing) {
-
             sf::Vector2f moveVec(0, 0);
             if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::W)) moveVec.y -= 1;
             if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::S)) moveVec.y += 1;
             if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::A)) moveVec.x -= 1;
             if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::D)) moveVec.x += 1;
 
-            player.move(normalize(moveVec) * pSpeed * dt);
+            dashTimer -= dt;
+            if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::Space) && dashTimer <= 0 && (moveVec.x != 0 || moveVec.y != 0)) {
+                isDashing = true;
+                dashTimer = dashCooldown;
+                dashDir = normalize(moveVec);
+            }
 
-            sf::Vector2f pos = player.getPosition();
-            pos.x = std::clamp(pos.x, 15.f, (float)W_WIDTH - 15.f);
-            pos.y = std::clamp(pos.y, 15.f, (float)W_HEIGHT - 15.f);
-            player.setPosition(pos);
+            if (isDashing) {
+                player.move(dashDir * pSpeed * 3.f * dt);
+                if (dashTimer < dashCooldown - 0.15f) isDashing = false;
+            } else {
+                player.move(normalize(moveVec) * pSpeed * dt);
+            }
 
-            if (sf::Mouse::isButtonPressed(sf::Mouse::Button::Left) && shootClock.getElapsedTime().asSeconds() > 0.3f) {
-                sf::Vector2i mPosRaw = sf::Mouse::getPosition(window);
-                sf::Vector2f mPos = window.mapPixelToCoords(mPosRaw);
-                sf::Vector2f dir = normalize(mPos - player.getPosition());
+            sf::Vector2f pPos = player.getPosition();
+            player.setPosition({std::clamp(pPos.x, 15.f, 785.f), std::clamp(pPos.y, 15.f, 585.f)});
 
+            if (sf::Mouse::isButtonPressed(sf::Mouse::Button::Left) && shootClock.getElapsedTime().asSeconds() > 0.25f) {
+                sf::Vector2f mPos = window.mapPixelToCoords(sf::Mouse::getPosition(window));
                 Bullet b;
-                b.shape.setRadius(4);
-                b.shape.setOrigin({4, 4});
-                b.shape.setFillColor(sf::Color::Yellow);
+                b.shape.setRadius(5); b.shape.setFillColor(sf::Color::Yellow); b.shape.setOrigin({5, 5});
                 b.shape.setPosition(player.getPosition());
-                b.velocity = dir * 600.f;
+                b.velocity = normalize(mPos - player.getPosition()) * 700.f;
                 b.damage = pDmg;
                 bullets.push_back(b);
                 shootClock.restart();
             }
 
-            if (spawnClock.getElapsedTime().asSeconds() > (1.2f / difficulty)) {
+            if (spawnClock.getElapsedTime().asSeconds() > (1.0f / (difficulty * 0.8f + floor * 0.2f))) {
                 Enemy e;
-                e.shape.setSize({30, 30});
-                e.shape.setOrigin({15, 15});
-                e.shape.setFillColor(sf::Color::Red);
-                e.shape.setPosition({(float)(rand() % W_WIDTH), -30.f});
-                e.hp = 30 + (floor * 10);
-                e.speed = 100 + (rand() % 50);
+                int typeRoll = rand() % 10;
+                if (typeRoll < 6) {
+                    e.type = EnemyType::Normal; e.hp = 40 + floor * 10; e.speed = 120; e.shape.setSize({30, 30}); e.shape.setFillColor(sf::Color::Red);
+                } else if (typeRoll < 9) {
+                    e.type = EnemyType::Fast; e.hp = 20 + floor * 5; e.speed = 220; e.shape.setSize({20, 20}); e.shape.setFillColor(sf::Color::Magenta);
+                } else {
+                    e.type = EnemyType::Tank; e.hp = 150 + floor * 20; e.speed = 60; e.shape.setSize({45, 45}); e.shape.setFillColor(sf::Color(150, 0, 0));
+                }
+                e.maxHp = e.hp;
+                e.shape.setOrigin(e.shape.getSize() / 2.f);
+
+                int side = rand() % 4;
+                if (side == 0) e.shape.setPosition({(float)(rand() % W_WIDTH), -50});
+                else if (side == 1) e.shape.setPosition({(float)(rand() % W_WIDTH), 650});
+                else if (side == 2) e.shape.setPosition({-50, (float)(rand() % W_HEIGHT)});
+                else e.shape.setPosition({850, (float)(rand() % W_HEIGHT)});
+
                 enemies.push_back(e);
                 spawnClock.restart();
             }
 
             for (size_t i = 0; i < bullets.size();) {
                 bullets[i].shape.move(bullets[i].velocity * dt);
-                bool hit = false;
-
+                bool removed = false;
                 for (size_t j = 0; j < enemies.size(); j++) {
                     if (bullets[i].shape.getGlobalBounds().findIntersection(enemies[j].shape.getGlobalBounds())) {
                         enemies[j].hp -= bullets[i].damage;
-                        hit = true;
+                        removed = true;
                         if (enemies[j].hp <= 0) {
-                            for (int k = 0; k < 10; k++) {
-                                Particle p;
-                                p.shape.setSize({4, 4});
-                                p.shape.setFillColor(sf::Color::Red);
-                                p.shape.setPosition(enemies[j].shape.getPosition());
-                                p.velocity = {(float)(rand() % 200 - 100), (float)(rand() % 200 - 100)};
-                                p.lifetime = 0.5f;
-                                particles.push_back(p);
+                            if (rand() % 100 < 20) {
+                                MedKit m; m.shape.setRadius(8); m.shape.setPointCount(4);
+                                m.shape.setFillColor(sf::Color::Green); m.shape.setOrigin({8,8});
+                                m.shape.setPosition(enemies[j].shape.getPosition());
+                                medkits.push_back(m);
                             }
+                            score += 15;
                             enemies.erase(enemies.begin() + j);
-                            score += 10;
                         }
                         break;
                     }
                 }
-
-                if (hit || bullets[i].shape.getPosition().y < -50 || bullets[i].shape.getPosition().y > 650
-                    || bullets[i].shape.getPosition().x < -50 || bullets[i].shape.getPosition().x > 850) {
-                    bullets.erase(bullets.begin() + i);
-                } else {
-                    i++;
-                }
-            }
-            for (size_t i = 0; i < enemies.size();) {
-                sf::Vector2f dir = normalize(player.getPosition() - enemies[i].shape.getPosition());
-                enemies[i].shape.move(dir * enemies[i].speed * dt);
-
-                if (enemies[i].shape.getGlobalBounds().findIntersection(player.getGlobalBounds())) {
-                    pHp -= 10;
-                    enemies.erase(enemies.begin() + i);
-                } else {
-                    i++;
-                }
-            }
-
-            for (size_t i = 0; i < particles.size();) {
-                particles[i].lifetime -= dt;
-                particles[i].shape.move(particles[i].velocity * dt);
-                if (particles[i].lifetime <= 0) particles.erase(particles.begin() + i);
+                if (removed || std::abs(bullets[i].shape.getPosition().x) > 1000) bullets.erase(bullets.begin() + i);
                 else i++;
+            }
+
+            for (size_t i = 0; i < enemies.size();) {
+                enemies[i].shape.move(normalize(player.getPosition() - enemies[i].shape.getPosition()) * enemies[i].speed * dt);
+                if (enemies[i].shape.getGlobalBounds().findIntersection(player.getGlobalBounds())) {
+                    pHp -= 15; enemies.erase(enemies.begin() + i);
+                } else i++;
+            }
+
+            for (size_t i = 0; i < medkits.size();) {
+                if (medkits[i].shape.getGlobalBounds().findIntersection(player.getGlobalBounds())) {
+                    pHp = std::min(100, pHp + 25);
+                    medkits.erase(medkits.begin() + i);
+                } else i++;
             }
 
             if (score >= nextFloorScore) state = GameState::Shop;
             if (pHp <= 0) state = GameState::GameOver;
         }
 
-        window.clear(sf::Color(30, 30, 35));
+        window.clear(sf::Color(20, 20, 25));
 
-        for (auto& p : particles) window.draw(p.shape);
+        for (auto& m : medkits) window.draw(m.shape);
         for (auto& b : bullets) window.draw(b.shape);
-        for (auto& e : enemies) window.draw(e.shape);
+        for (auto& e : enemies) {
+            window.draw(e.shape);
+            sf::RectangleShape hbBg({e.shape.getSize().x, 4});
+            hbBg.setFillColor(sf::Color::Black);
+            hbBg.setPosition({e.shape.getPosition().x - e.shape.getSize().x/2, e.shape.getPosition().y - e.shape.getSize().y/2 - 10});
+            sf::RectangleShape hbFill({(e.hp / e.maxHp) * e.shape.getSize().x, 4});
+            hbFill.setFillColor(sf::Color::Green);
+            hbFill.setPosition(hbBg.getPosition());
+            window.draw(hbBg); window.draw(hbFill);
+        }
         window.draw(player);
 
         if (fontLoaded) {
-            if (state == GameState::Menu) {
-                uiText.setString("SETTINGS\nDifficulty: " + std::to_string(difficulty) + "\nPress Enter to Start\nUse Arrows to change Difficulty");
-                uiText.setPosition({200, 200});
-            } else if (state == GameState::Playing) {
-                uiText.setString("Floor: " + std::to_string(floor) + " | HP: " + std::to_string(pHp) + " | Score: " + std::to_string(score));
-                uiText.setPosition({10, 10});
-            } else if (state == GameState::Shop) {
-                uiText.setString("SHOP (Next floor: " + std::to_string(nextFloorScore) + ")\n1: +Damage\n2: +Speed\n3: Heal HP");
-                uiText.setPosition({250, 250});
-            } else if (state == GameState::GameOver) {
-                uiText.setString("GAME OVER! Score: " + std::to_string(score) + "\nPress Enter to Restart");
-                uiText.setPosition({300, 250});
-            }
+            if (state == GameState::Menu) uiText.setString("ROGUE SQUARE\nPress Enter to Start\nDifficulty: " + std::to_string(difficulty));
+            else if (state == GameState::Playing) uiText.setString("Floor: " + std::to_string(floor) + " | HP: " + std::to_string(pHp) + " | Score: " + std::to_string(score) + (dashTimer <= 0 ? " | DASH READY" : ""));
+            else if (state == GameState::Shop) uiText.setString("FLOOR CLEAR! Pick Upgrade:\n1: +Damage\n2: +Speed\n3: Full Heal");
+            else if (state == GameState::GameOver) uiText.setString("DIED ON FLOOR " + std::to_string(floor) + "\nFinal Score: " + std::to_string(score) + "\nPress Enter to restart");
+
+            uiText.setPosition({10, 10});
             window.draw(uiText);
         }
-
         window.display();
     }
     return 0;
